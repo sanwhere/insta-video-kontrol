@@ -12,6 +12,9 @@
   const MIN_W = 160;
   const MIN_H = 120;
   const BAR_H = 64;
+  // Free strip under the controls so Instagram's own corner buttons (mute, tags) stay clickable.
+  const BOTTOM_GAP = 44;
+  const SOUND_KEY = 'ivk-sound';
 
   const ICON = {
     play: '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>',
@@ -26,15 +29,16 @@
   host.setAttribute('data-ivk', '');
   Object.assign(host.style, {
     position: 'fixed', left: '0px', top: '0px', width: '0px', height: '0px',
-    zIndex: '2147483647', display: 'none', margin: '0', padding: '0', border: '0'
+    zIndex: '2147483647', display: 'none', margin: '0', padding: '0', border: '0',
+    pointerEvents: 'none' // only the track and buttons take clicks; the rest falls through to Instagram
   });
   const root = host.attachShadow({ mode: 'open' });
   root.innerHTML = `
 <style>
 .wrap{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:flex-end;padding:0 10px 4px;box-sizing:border-box;
-  background:linear-gradient(to bottom,rgba(0,0,0,0),rgba(0,0,0,.75));
+  pointer-events:none;background:linear-gradient(to bottom,rgba(0,0,0,0),rgba(0,0,0,.6) 45%,rgba(0,0,0,.3));
   font:600 12px/1 -apple-system,"Segoe UI",Roboto,Arial,sans-serif;color:#fff;-webkit-user-select:none;user-select:none}
-.track{position:relative;height:16px;cursor:pointer;touch-action:none;flex:none}
+.track{position:relative;height:16px;cursor:pointer;touch-action:none;flex:none;pointer-events:auto}
 .rail,.buf,.fill{position:absolute;left:0;top:6px;height:4px;border-radius:2px}
 .rail{right:0;background:rgba(255,255,255,.3)}
 .buf{width:0;background:rgba(255,255,255,.5)}
@@ -47,7 +51,7 @@
   font-size:11px;display:none;white-space:nowrap;pointer-events:none}
 .row{display:flex;align-items:center;gap:2px;height:32px;flex:none}
 button{all:unset;box-sizing:border-box;height:28px;min-width:28px;padding:0 6px;border-radius:6px;display:inline-flex;align-items:center;
-  justify-content:center;cursor:pointer;color:#fff;font:inherit;white-space:nowrap}
+  justify-content:center;cursor:pointer;color:#fff;font:inherit;white-space:nowrap;pointer-events:auto}
 button:hover{background:rgba(255,255,255,.2)}
 svg{width:18px;height:18px;fill:currentColor;display:block}
 .time{margin-left:6px;font-variant-numeric:tabular-nums;white-space:nowrap}
@@ -108,6 +112,11 @@ svg{width:18px;height:18px;fill:currentColor;display:block}
   let flashTimer = 0;
   let lastPlayIcon = '';
   let lastMuteIcon = '';
+  let wantSound = false; // remembered "sound on" preference, applied to every new video
+  try { wantSound = localStorage.getItem(SOUND_KEY) === '1'; } catch (_) { /* ignore */ }
+  let selfChangeAt = -1e9; // when we last changed muted/volume ourselves
+  let lastUserInputAt = -1e9; // last real click/key, to tell Instagram's mute button from its autoplay muting
+  const unmuteTries = new WeakMap();
 
   // ---------- helpers ----------
   const clamp = (n, a, b) => Math.min(Math.max(n, a), b);
@@ -196,10 +205,78 @@ svg{width:18px;height:18px;fill:currentColor;display:block}
     }
   }
 
+  function setWantSound(on) {
+    wantSound = on;
+    try { localStorage.setItem(SOUND_KEY, on ? '1' : '0'); } catch (_) { /* ignore */ }
+  }
+
+  function setMuted(v, muted) {
+    const wasPlaying = !v.paused;
+    selfChangeAt = performance.now();
+    v.muted = muted;
+    if (!muted && v.volume === 0) v.volume = 1;
+    if (!muted && wasPlaying) {
+      // Chrome pauses a video unmuted without user activation; fall back to muted playback then.
+      setTimeout(() => {
+        if (v.paused) {
+          selfChangeAt = performance.now();
+          v.muted = true;
+          const p = v.play();
+          if (p && p.catch) p.catch(() => {});
+        }
+      }, 0);
+    }
+  }
+
   function toggleMute(v) {
-    v.muted = !v.muted;
-    if (!v.muted && v.volume === 0) v.volume = 1;
-    flash(v.muted ? 'Ses kapali' : 'Ses acik');
+    const muted = !v.muted;
+    setMuted(v, muted);
+    setWantSound(!muted);
+    flash(muted ? 'Ses kapali' : 'Ses acik');
+  }
+
+  // Unmute a video Instagram started muted, if the user wants sound. Capped per video so we
+  // never end up in a tug of war with Instagram re-muting it.
+  function applySound(v) {
+    if (!wantSound || !v.muted) return;
+    const ua = navigator.userActivation;
+    if (ua && !ua.hasBeenActive) return; // autoplay policy: wait for the first click/key on the page
+    const now = performance.now();
+    const t = unmuteTries.get(v) || { n: 0, at: 0 };
+    if (now - t.at > 3000) t.n = 0;
+    if (t.n >= 3) return;
+    t.n++;
+    t.at = now;
+    unmuteTries.set(v, t);
+    setMuted(v, false);
+  }
+
+  document.addEventListener('play', (e) => {
+    if (e.target instanceof HTMLVideoElement) applySound(e.target);
+  }, true);
+
+  document.addEventListener('volumechange', (e) => {
+    const v = e.target;
+    if (!(v instanceof HTMLVideoElement)) return;
+    const now = performance.now();
+    if (now - selfChangeAt < 150) return; // our own change
+    if (now - lastUserInputAt < 1000 && clickedInside(v)) {
+      setWantSound(!v.muted); // user pressed Instagram's own mute button (or tapped the video)
+    } else if (v.muted) {
+      applySound(v); // Instagram muted it on its own (autoplay, re-render)
+    }
+  }, true);
+
+  // The video that was under the pointer at the last real click (Instagram's mute button sits on it).
+  let lastClickVideo = null;
+  window.addEventListener('pointerdown', (e) => {
+    if (!e.isTrusted) return;
+    lastUserInputAt = performance.now();
+    lastClickVideo = videoAt(e.clientX, e.clientY);
+  }, true);
+
+  function clickedInside(v) {
+    return lastClickVideo === v;
   }
 
   function stepSpeed(v, dir) {
@@ -307,6 +384,7 @@ svg{width:18px;height:18px;fill:currentColor;display:block}
     if (dragging) return;
     const v = mouse.inside ? videoAt(mouse.x, mouse.y) : null;
     if (v) {
+      if (v !== hovered) applySound(v);
       hovered = v;
       active = v;
       hideAt = 0;
@@ -396,9 +474,11 @@ svg{width:18px;height:18px;fill:currentColor;display:block}
 
     host.style.display = 'block';
     host.style.left = `${r.left}px`;
-    host.style.top = `${r.bottom - BAR_H}px`;
+    const gap = r.height >= 300 ? BOTTOM_GAP : 0;
+    host.style.top = `${r.bottom - BAR_H - gap}px`;
     host.style.width = `${r.width}px`;
-    host.style.height = `${BAR_H}px`;
+    host.style.height = `${BAR_H + gap}px`;
+    wrap.style.paddingBottom = `${4 + gap}px`;
     wrap.classList.toggle('compact', r.width < 380);
 
     const v = active;

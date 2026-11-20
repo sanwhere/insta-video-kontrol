@@ -11,9 +11,11 @@ Instagram's desktop site plays videos and reels with no seek bar: if you miss a 
 - **Progress bar**: click or drag anywhere to jump; hovering shows the time under the cursor; the buffered range is shown behind it
 - **Seek buttons**: `-10` `-5` `+5` `+10` seconds
 - **Play / pause, mute, playback speed** (0.5x to 2x) and **fullscreen** (with Chrome's native controls)
+- **Remembers sound**: Instagram starts every video muted. Turn the sound on once (with the bar, <kbd>M</kbd> or Instagram's own speaker button) and every following video plays with sound; mute again to go back
 - **Keyboard shortcuts** that do not break Instagram's own navigation
+- **Stays out of the way**: the controls sit just above Instagram's own corner buttons (mute, tags), and only the buttons and the progress bar take clicks; the rest of the bar lets clicks through to the video
 - Built for the feed, reels, post pages, the post modal and stories
-- **No permissions, no network requests, no tracking**: a single content script, about 430 lines of plain JavaScript
+- **No permissions, no network requests, no tracking**: a single content script, about 500 lines of plain JavaScript
 
 ## Keyboard shortcuts
 
@@ -52,6 +54,7 @@ Instead, the extension:
 1. Keeps **one** control bar in a shadow root attached directly to `<html>`, outside Instagram's React tree. Instagram's overlays can never cover it, its styles cannot leak in, and clicks on the bar are stopped before Instagram sees them.
 2. On mouse move and scroll, finds the video under the cursor by comparing the pointer with each video's **visible** rectangle (clipped by `overflow: hidden` ancestors and the viewport).
 3. While the bar is visible, a `requestAnimationFrame` loop pins it to the bottom of that video and updates time, progress and buffer. When the bar is hidden, nothing runs.
+4. For sound, it listens to `play` and `volumechange` on all videos. A mute change right after a real click on that video counts as your choice and is saved (`localStorage`, key `ivk-sound`). A mute that Instagram applies on its own (autoplay, re-render) is undone while sound is wanted, at most three times per video so it never fights Instagram in a loop. Chrome's autoplay policy only allows sound after your first click or key press on the page; until then videos stay muted.
 
 ## Notes
 
