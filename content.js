@@ -114,7 +114,6 @@ svg{width:18px;height:18px;fill:currentColor;display:block}
   let lastMuteIcon = '';
   let wantSound = false; // remembered "sound on" preference, applied to every new video
   try { wantSound = localStorage.getItem(SOUND_KEY) === '1'; } catch (_) { /* ignore */ }
-  let selfChangeAt = -1e9; // when we last changed muted/volume ourselves
   let lastUserInputAt = -1e9; // last real click/key, to tell Instagram's mute button from its autoplay muting
   const unmuteTries = new WeakMap();
 
@@ -210,22 +209,18 @@ svg{width:18px;height:18px;fill:currentColor;display:block}
     try { localStorage.setItem(SOUND_KEY, on ? '1' : '0'); } catch (_) { /* ignore */ }
   }
 
+  // What we last set on each video, so a volumechange can be told apart from Instagram's.
+  const selfSet = new WeakMap();
+
   function setMuted(v, muted) {
-    const wasPlaying = !v.paused;
-    selfChangeAt = performance.now();
+    selfSet.set(v, { muted, at: performance.now() });
     v.muted = muted;
     if (!muted && v.volume === 0) v.volume = 1;
-    if (!muted && wasPlaying) {
-      // Chrome pauses a video unmuted without user activation; fall back to muted playback then.
-      setTimeout(() => {
-        if (v.paused) {
-          selfChangeAt = performance.now();
-          v.muted = true;
-          const p = v.play();
-          if (p && p.catch) p.catch(() => {});
-        }
-      }, 0);
-    }
+  }
+
+  function isOwnChange(v) {
+    const s = selfSet.get(v);
+    return !!s && performance.now() - s.at < 150 && s.muted === v.muted;
   }
 
   function toggleMute(v) {
@@ -235,31 +230,44 @@ svg{width:18px;height:18px;fill:currentColor;display:block}
     flash(muted ? 'Ses kapali' : 'Ses acik');
   }
 
-  // Unmute a video Instagram started muted, if the user wants sound. Capped per video so we
-  // never end up in a tug of war with Instagram re-muting it.
+  // At least half of the video is on screen (skips preloaded/offscreen players).
+  function mostlyVisible(v) {
+    const r = v.getBoundingClientRect();
+    const vis = visRect(v);
+    return !!vis && vis.width * vis.height >= 0.5 * r.width * r.height;
+  }
+
+  // Unmute a playing, on-screen video that Instagram keeps muted, while the user wants sound.
+  // Driven by timeupdate too, so it keeps working however and whenever Instagram mutes.
+  // Rate-limited (one try per 250 ms, 12 per 5 s) so a stubborn re-mute cannot turn into a loop.
   function applySound(v) {
-    if (!wantSound || !v.muted) return;
+    if (!wantSound || !v.muted || v.paused) return;
     const ua = navigator.userActivation;
     if (ua && !ua.hasBeenActive) return; // autoplay policy: wait for the first click/key on the page
+    if (!mostlyVisible(v)) return;
     const now = performance.now();
-    const t = unmuteTries.get(v) || { n: 0, at: 0 };
-    if (now - t.at > 3000) t.n = 0;
-    if (t.n >= 3) return;
+    // Right after a real click on this video, let its volumechange arrive first: the click may be
+    // the user muting it with Instagram's own button.
+    if (now - lastUserInputAt < 600 && clickedInside(v)) return;
+    let t = unmuteTries.get(v);
+    if (!t || now - t.since > 5000) { t = { n: 0, at: 0, since: now }; unmuteTries.set(v, t); }
+    if (now - t.at < 250 || t.n >= 12) return;
     t.n++;
     t.at = now;
-    unmuteTries.set(v, t);
     setMuted(v, false);
   }
 
-  document.addEventListener('play', (e) => {
-    if (e.target instanceof HTMLVideoElement) applySound(e.target);
-  }, true);
+  for (const type of ['play', 'playing', 'loadeddata', 'timeupdate']) {
+    document.addEventListener(type, (e) => {
+      if (e.target instanceof HTMLVideoElement) applySound(e.target);
+    }, true);
+  }
 
   document.addEventListener('volumechange', (e) => {
     const v = e.target;
     if (!(v instanceof HTMLVideoElement)) return;
     const now = performance.now();
-    if (now - selfChangeAt < 150) return; // our own change
+    if (isOwnChange(v)) return;
     if (now - lastUserInputAt < 1000 && clickedInside(v)) {
       setWantSound(!v.muted); // user pressed Instagram's own mute button (or tapped the video)
     } else if (v.muted) {
