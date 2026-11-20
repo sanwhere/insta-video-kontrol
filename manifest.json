@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "Insta Video Kontrol",
+  "version": "1.0.0",
+  "description": "Instagram videolarina ileri/geri sarma, ilerleme cubugu, hiz, ses ve klavye kisayollari ekler.",
+  "content_scripts": [
+    {
+      "matches": ["https://www.instagram.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
